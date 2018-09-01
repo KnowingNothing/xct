@@ -160,6 +160,7 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 	int line[2*IMGSIZE];
 	float weight[2*IMGSIZE];
 	float d[2*IMGSIZE];
+	float cached_f[2*IMGSIZE];
 
 	wray(np, nr, line, weight, &numb);
 
@@ -169,6 +170,7 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 		int y = line[i]%IMGSIZE+1;
 		int ind=x*(IMGSIZE+2)+y;
 		Af += f[ind]*weight[i];
+		cached_f[i] = f[ind];
 	}
 	Af -= g[np*NRAY+nr];
 
@@ -188,9 +190,10 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 		if (f[ind]>255)
 			atomicExch(&f[ind], 255);
 #else
-		f[ind] += lambda*d[i];
-		if (f[ind]<0) f[ind] = 0;
-		if (f[ind]>255) f[ind] = 255;
+		cached_f[i] += lambda*d[i];
+		if (cached_f[i]<0) cached_f[i] = 0;
+		if (cached_f[i]>255) cached_f[i] = 255;
+		f[ind] = cached_f[i];
 #endif
 	}
 
