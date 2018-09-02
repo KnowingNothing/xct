@@ -149,7 +149,8 @@ __device__ void wray(int np, int nr, int *line, float *weight, int *numb){
 	
 }
 
-__global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int *position, float lambda){
+__global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int *position, float lambda, 
+	Node *records, Lock lock, Global_counter counter){
 
 	int i;
 	i=blockIdx.x*blockDim.x+threadIdx.x;
@@ -188,9 +189,10 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 		if (f[ind]>255)
 			atomicExch(&f[ind], 255);
 #else
-		f[ind] += lambda*d[i];
-		if (f[ind]<0) f[ind] = 0;
-		if (f[ind]>255) f[ind] = 255;
+		float tmp = f[ind] + lambda*d[i];
+		if (tmp<0) tmp = 0;
+		if (tmp>255) tmp = 255;
+		f[ind] = tmp;
 #endif
 	}
 

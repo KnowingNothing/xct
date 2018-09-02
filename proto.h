@@ -15,4 +15,6 @@
 
 #define PI 3.14159265359
 
+#define MAX_RECORDS 10000
+
 #endif

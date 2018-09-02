@@ -126,10 +126,20 @@ void MSbeam() {
 		exit(EXIT_FAILURE);
 	}
 
-        
+    Node *records = NULL;
+	Node *d_records = NULL;
+	records = (Node*)alloc(sizeof(Node) * MAX_RECORDS);
+	err = cudaMalloc((void**)&d_records, sizeof(Node) * MAX_RECORDS);
+    if (err != cudaSuccess){
+		fprintf(stderr, "Failed to allocate device records (error code %s)!\n", cudaGetErrorString(err));
+    	exit(EXIT_FAILURE);
+    }
 
+	Lock lock;
+	Global_counter counter;
 
-	XCT_Reconstruction<<<blocks, threads>>>(d_f, d_v, d_g, d_angle, d_position, lambda);
+	for(int j = 0; i < 10; ++j)
+		XCT_Reconstruction<<<blocks, threads>>>(d_f, d_v, d_g, d_angle, d_position, lambda, d_records, lock, counter);
 
 	err = cudaGetLastError();
 
@@ -152,6 +162,12 @@ void MSbeam() {
 		exit(EXIT_FAILURE);
 	}
 
+	err=cudaMemcpy(records, d_records, sizeof(Node) * (MAX_RECORDS), cudaMemcpyDeviceToHost);
+	if (err != cudaSuccess){
+		fprintf(stderr, "Failed to copy records from device to host (error code %s)!\n", cudaGetErrorString(err));
+		exit(EXIT_FAILURE);
+	}
+
 
 	err=cudaFree(d_f);
     if (err != cudaSuccess){
@@ -168,6 +184,12 @@ void MSbeam() {
 	err=cudaFree(d_g);
     if (err != cudaSuccess){
        	fprintf(stderr, "Failed to free vector d_f (error code %s)!\n", cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+	}
+
+	err=cudaFree(d_records);
+    if (err != cudaSuccess){
+       	fprintf(stderr, "Failed to free d_records (error code %s)!\n", cudaGetErrorString(err));
         exit(EXIT_FAILURE);
 	}
 }
