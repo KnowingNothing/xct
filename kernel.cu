@@ -165,7 +165,7 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 	int parent_id;
 
 	lock.lock();
-	parent_id = counter.counter;
+	parent_id = *(counter.counter);
 	wray(np, nr, line, weight, &numb);
 
 	float Af = 0.0f;
@@ -193,12 +193,12 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 		if (tmp<0) tmp = 0;
 		if (tmp>255) tmp = 255;
 		lock.lock();
-		if(counter.counter < MAX_RECORDS)
+		if(*(counter.counter) < MAX_RECORDS)
 		{
-			records[counter.counter].pre = parent_id;
-			records[counter.counter].pos = ind;
-			records[counter.counter].delta = lambda * d[i];
-			counter.counter += 1;
+			records[*(counter.counter)].pre = parent_id;
+			records[*(counter.counter)].pos = ind;
+			records[*(counter.counter)].delta = lambda * d[i];
+			*(counter.counter) += 1;
 		}
 		lock.unlock();
 	}
