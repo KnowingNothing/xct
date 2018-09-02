@@ -26,22 +26,18 @@ static void handle_error(cudaError_t err, const char* msg, const char* file, int
 
 #define HANDLE_ERROR(err, msg) (handle_error(err, msg, __FILE__, __LINE__))
 
-typedef struct{
+struct Node{
     Node *pre;
     int pos;
     float delta;
-} Node;
+};
 
-typedef struct{
+struct Lock{
     int *mutex;
     Lock()
     {
-        char *msg = new char[100];
-        msg = "Malloc lock";
-        HANDLE_ERROR(cudaMalloc((void**)&mutex, sizeof(int)), msg);
-        msg = "Initiate lock";
-        HANDLE_ERROR(cudaMemset(mutex, 0, sizeof(int)), msg);
-        free(msg);
+        HANDLE_ERROR(cudaMalloc((void**)&mutex, sizeof(int)), "Malloc lock");
+        HANDLE_ERROR(cudaMemset(mutex, 0, sizeof(int)), "Initialize lock");
     }
     ~Lock()
     {
@@ -58,22 +54,19 @@ typedef struct{
         __threadfence();
         atomicExch(mutex, 0);
     }
-} Lock;
+};
 
-typedef struct{
+struct Global_counter{
     int *counter;
     Global_counter(int initial = 0)
     {
-        char *msg = new char[100];
-        msg = "Malloc counter";
-        HANDLE_ERROR(cudaMalloc((void**)&counter, sizeof(int)), msg);
-        msg = "Initailize counter";
-        HANDLE_ERROR(cudaMemcpy(counter, &initial, sizeof(int), cudaMemcpyHostToDevice), msg);
+        HANDLE_ERROR(cudaMalloc((void**)&counter, sizeof(int)), "Malloc counter");
+        HANDLE_ERROR(cudaMemcpy(counter, &initial, sizeof(int), cudaMemcpyHostToDevice), "Initialize counter");
     }
     ~Global_counter()
     {
         cudaFree(counter);
     }
-} Global_counter;
+};
 
 #endif
