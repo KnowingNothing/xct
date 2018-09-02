@@ -161,7 +161,11 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 	int line[2*IMGSIZE];
 	float weight[2*IMGSIZE];
 	float d[2*IMGSIZE];
+	float cached_f[2*IMGSIZE];
+	int parent_id;
 
+	lock.lock();
+	parent_id = counter.counter;
 	wray(np, nr, line, weight, &numb);
 
 	float Af = 0.0f;
@@ -169,8 +173,11 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 		int x = line[i]/IMGSIZE+1;
 		int y = line[i]%IMGSIZE+1;
 		int ind=x*(IMGSIZE+2)+y;
-		Af += f[ind]*weight[i];
+		cached_f[i] = f[ind];
+		Af += cached_f[i]*weight[i];
 	}
+	lock.unlock();
+
 	Af -= g[np*NRAY+nr];
 
 	for (i = 0; i<numb; ++i)
@@ -182,18 +189,18 @@ __global__ void XCT_Reconstruction(float *f, float *v, float *g, int *angle, int
 		int y = line[i]%IMGSIZE+1;
 		int ind=x*(IMGSIZE+2)+y;
 
-#if __ATOMIC__
-		atomicAdd(&f[ind], lambda*d[i]);
-		if (f[ind]<0)
-			atomicExch(&f[ind], 0);
-		if (f[ind]>255)
-			atomicExch(&f[ind], 255);
-#else
-		float tmp = f[ind] + lambda*d[i];
+		float tmp = cached_f[i] + lambda*d[i];
 		if (tmp<0) tmp = 0;
 		if (tmp>255) tmp = 255;
-		f[ind] = tmp;
-#endif
+		lock.lock();
+		if(counter.counter < MAX_RECORDS)
+		{
+			records[counter.counter].pre = parent_id;
+			records[counter.counter].pos = ind;
+			records[counter.counter].delta = lambda * d[i];
+			counter.counter += 1;
+		}
+		lock.unlock();
 	}
 
 }

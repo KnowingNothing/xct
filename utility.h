@@ -27,7 +27,7 @@ static void handle_error(cudaError_t err, const char* msg, const char* file, int
 #define HANDLE_ERROR(err, msg) (handle_error(err, msg, __FILE__, __LINE__))
 
 struct Node{
-    Node *pre;
+    int pre;
     int pos;
     float delta;
 };
