@@ -128,7 +128,7 @@ void MSbeam() {
 
     Node *records = NULL;
 	Node *d_records = NULL;
-	records = (Node*)alloc(sizeof(Node) * MAX_RECORDS);
+	records = (Node*)malloc(sizeof(Node) * MAX_RECORDS);
 	err = cudaMalloc((void**)&d_records, sizeof(Node) * MAX_RECORDS);
     if (err != cudaSuccess){
 		fprintf(stderr, "Failed to allocate device records (error code %s)!\n", cudaGetErrorString(err));
