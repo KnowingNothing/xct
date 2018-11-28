@@ -24,6 +24,13 @@ class Warning(INFO):
         print("[Warning] {}".format(self._msg))
 
 class Error(INFO):
+    def __init__(self, msg, e):
+        super(Error, self).__init__(msg)
+        if isinstance(e, Exception):
+            raise e
+        else:
+            raise Exception("Unknown error occurs")
+    
     def Print(self):
         print("[Error] {}".format(self._msg))
 
