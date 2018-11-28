@@ -5,12 +5,8 @@ from collections import deque
 from error import Warning, INFO, Error, __LINE__
 
 NotSure = 1024
-Node_embed_dim = 8
+Node_feature_dim = 4
 Axis_feature_dim = 5
-Action_embed_dim = 8
-Column_dim = 16
-Kernel_size_1 = 3
-
 
 op2node = {}
 op2index = {}
@@ -37,9 +33,15 @@ class oNode(object):
             except Exception:
                 tmp = NotSure
             self._shape.append(tmp)
-        self._feature = []
+        self._use_feature = []
         for i in range(len(self._shape)):
-            self._feature.append([])    
+            self._use_feature.append({})    
+        _feature = torch.zeros(Node_feature_dim, dtype=torch.float32)
+        _feature[1] = len(self._shape)
+        _feature[2] = len(self._op.input_tensors)
+        if self._op in down_graph:
+            _feature[3] = len(down_graph[self._op])
+        self._feature = _feature
     
     def add_axis_feature(self, msg):
         pass
@@ -48,8 +50,9 @@ class oNode(object):
         print("-------------------------------------------------")
         print("op:{} features:".format(self._op))
         print("    output shape: {}".format(self._shape))
-        print("    operation feature:")
-        for i, f in enumerate(self._feature):
+        print("    self feature: {}".format(self._feature))
+        print("    use feature:")
+        for i, f in enumerate(self._use_feature):
             print("        at dim {}: {}".format(i, f))
         print("-------------------------------------------------")
 
@@ -59,11 +62,14 @@ class oNode(object):
         '''
         tmp = []
         node = op2node[op]
+        index = op2index[op]
         for var_name, ab in msg.items():
             dom = node.get_dom(var_name)
             no = node.get_pos(var_name)
-            tmp.append(torch.tensor([op2index[op], no, ab['a'], ab['b'], dom], dtype=torch.float32))
-        self._feature[where].extend(tmp)
+            tmp.append(torch.tensor([where, no, ab['a'], ab['b'], dom], dtype=torch.float32))
+        if index not in self._use_feature[where]:
+            self._use_feature[where][index] = []
+        self._use_feature[where][index].extend(tmp)
     
     def get_dom(self, var_name):
         return 0
@@ -71,8 +77,17 @@ class oNode(object):
     def get_pos(self, var_name):
         return -1
     
+    def get_use_feature(self):
+        return self._use_feature
+    
     def get_feature(self):
         return self._feature
+    
+    def add_schedule(self, schedule):
+        self._schedule_record.append((action2index[schedule.__class__], schedule))
+    
+    def get_schedule_list(self):
+        return self._schedule_record
 
 
 
@@ -94,6 +109,7 @@ class cNode(oNode):
     '''
     def __init__(self, op, total=1):
         super(cNode, self).__init__(op, total)
+        self._feature[0] = len(self._op.reduce_axis)
         length = len(op.axis) + len(op.reduce_axis)
         self._axis2index = {}
         self._index2axis = []
@@ -154,22 +170,8 @@ class cNode(oNode):
             for op_index, f in self._axis2feature[var_name].items():
                 print("         at op: {}".format(index2op[op_index]))
                 for ff in f:
-                    print("          {}".format(ff.get_feature()))
+                    print("          {}".format(ff))
         print("-------------------------------------------------")
-
-
-class VarFeature(object):
-    '''
-    class containing feature of axis
-    '''
-    def __init__(self, op_index, index_number, a, b, dom):
-        self._feature = torch.tensor([op_index, index_number, a, b, dom], dtype=torch.float32)
-    
-    def __str__(self):
-        return str(self._feature)
-
-    def get_feature(self):
-        return self._feature
 
 
 class Action(object):
@@ -216,6 +218,13 @@ class Unroll(Action):
         super(Parallel, self).__init__()
         self._axis = axis
 
+
+def load_actions_embedding(f=None):
+    if f is None:
+        embedding = torch.eye(len(index2action))
+    else:
+        pass    # TODO load pretrained embeddings
+    return embedding
 
 '''
 Belowing are a series of Visit_XXX functions,
@@ -342,7 +351,7 @@ def Visit_Call(call, msg=None):
         expr = tvm.ir_pass.Simplify(expr)
         Visit_Expr(expr, msg)
         for var_name, ab in msg['vars'].items():
-            feature = VarFeature(op2index[op], i, ab['a'], ab['b'], origin_node.get_dom(var_name))
+            feature = torch.tensor([origin_node.get_pos(var_name), i, ab['a'], ab['b'], origin_node.get_dom(var_name)], dtype=torch.float32)
             if op2index[op] not in msg['features'][var_name]:
                 msg['features'][var_name][op2index[op]] = []
             msg['features'][var_name][op2index[op]].append(feature)
@@ -528,38 +537,9 @@ def entry(ops):
     # prepare actions
     load_actions()
 
+    for op, node in op2node.items():
+        node.print_feature()
 
-class Agent(nn.Module):
-    def __init__(self, actions_len, nodes_len):
-        super(Agent, self).__init__()
-        # All parameters are here, but not all initialized here
-        node2embed = torch.rand([nodes_len, Node_embed_dim], dtype=torch.float32, requires_grad=True)
-        action2embed = torch.rand([actions_len, Node_embed_dim], dtype=torch.float32, requires_grad=True)
-        weight_node2column = torch.rand([Node_embed_dim, Column_dim], dtype=torch.float32, requires_grad=True)
-        weight_axis2column = torch.rand([Axis_feature_dim, Column_dim], dtype=torch.float32, requires_grad=True)
-        weight_action2column = torch.rand([Action_embed_dim, Column_dim], dtype=torch.float32, requires_grad=True)
-        Kernel_whole_graph = torch.rand([Column_dim * Kernel_size_1, Column_dim], dtype=torch.float32, requires_grad=True)
+    
 
-    def forward(self):
-        pass         
 
-    def initialize_node_embed():
-    for op in index2op:
-        node = op2node[op]
-        node2embed[node] = torch.rand(Node_embed_dim, dtype=torch.float32, requires_grad=True)
-
-    def initialize_action_embed():
-        
-        for action in actions:
-            action2embed[action] = torch.rand(Action_embed_dim, dtype=torch.float32, requires_grad=True)
-
-    def get_whole_graph_feature():
-        pad_node = torch.zero(Column_dim, dtype=torch.float32)
-        padded_graph = []
-        for i in range(Kernel_size_1 // 2):
-            padded_graph.append(pad_node)
-        for i, op in enumerate(index2op):
-            padded_graph.append(node2embed[op2node[op]].matmul(weight_node2column))
-        for i in range(Kernel_size_1 // 2):
-            padded_graph.append(pad_node)
-        for op in index2op:
