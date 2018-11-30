@@ -41,139 +41,219 @@ class AxisCell(nn.Module):
 
 
 class Agent(nn.Module):
-    def __init__(self, Node_feature_dim, Axis_feature_dim, hidden, num_actions, actions_embed=None, freeze_embed=False):
+    def __init__(self, Node_feature_dim, Axis_feature_dim, hidden, attention=False, possible_split_parts=None, reorder_len=4):
         super(Agent, self).__init__()
         # All parameters are here, but not all initialized here
-        if actions_embed is None:
-            actions_embed = torch.eye(num_actions)
         self._hidden = hidden
-        self._action2embed = nn.Embedding.from_pretrained(actions_embed, freeze_embed)
-        self._action_cell = AxisCell(self._action2embed.weight.shape[1], hidden)
-        self._schedule_cell = NodeCell(hidden * 2, hidden)
+
         self._node_cell = NodeCell(Node_feature_dim, hidden)
         self._axis_cell = AxisCell(Axis_feature_dim, hidden)
         self._reduce_axis_cell = AxisCell(Axis_feature_dim, hidden)
-        self._attention = P(torch.rand([2 * hidden, hidden], requires_grad=True))
-        self._Output1 = nn.Linear(hidden * 3, hidden)
-        self._Output2 = nn.Linear(hidden, num_actions)
-        self._cache_schedule = {}
-        self._cache_up_states = {}
-        self._cache_down_states = {}
-        self._last_h = torch.zeros(hidden)
+        # whether to use attention
+        if attention:
+            self._attention = P(torch.rand([2 * hidden, hidden], requires_grad=True))
+        self._with_attention = attention
 
+        # useful states
+        self._up_states = {}
+        self._down_states = {}
+        self._last_h = torch.ones(hidden)
+        # use to decide how many parts Split Schedule can split
+        self._possible_split_parts = possible_split_parts if possible_split_parts else [1, 2, 3, 4]
+
+        # a layer before deciders
+        self._trans = nn.Linear(hidden * 2, hidden)
+        # a decider whether ot compute inline, [inline, not_inline]
+        self._inline_decider = nn.Linear(hidden, 2)
+        # a decider whether and where to compute at, [at, not_at, where]
+        self._at_decider = nn.Linear(hidden, 3)
+        # a decider whether and how to split an axis, [p1, p2...]
+        self._split_decider = nn.Linear(hidden + Axis_feature_dim, len(self._possible_split_parts))
+        # a decider whether to fuse with the latter axis, [fuse, not_fuse]
+        self._fuse_decider = nn.Linear(hidden + Axis_feature_dim, 2)
+        # a decider whether to reorder the axes, [v1, v2...]
+        self._reorder_decider = nn.Linear(hidden + Axis_feature_dim * reorder_len, reorder_len)
+        # a decider whether to parallel the axis, [parallel, not_parallel]
+        self._parallel_decider = nn.Linear(hidden + Axis_feature_dim, 2)
+        # a decider whether to unroll the axis, [unroll, not_unroll]
+        self._unroll_decider = nn.Linear(hidden + Axis_feature_dim, 2)
+        # a decider whether to vectorize the axis, [vectorize, not_vectorize]
+        self._vectorize_decider = nn.Linear(hidden + Axis_feature_dim, 2)
+        
+        # use to mark whether reset
         self._new = False
         self._first_call = True
 
-    def forward(self, op, op2node):
+    def forward(self, op, down_graph, op2node, op2index, issue, others=None):
         if self._first_call and not self._new:
             Warning("You forget to reset model before using")
         self._first_call = False
-        attention_state = self._get_attention(self._last_h)
-        region_state = self._get_region_feature(op, op2node)
-        state = torch.cat([attention_state, region_state])
-        tmp = self._Output1(state)
-        self._last_h = tmp
-        res = self._Output2(tmp)
-        return torch.softmax(res, dim=0)
+        # if self._with_attention:
+        #     attention_state = self._get_attention(self._last_h)
+        self._update_region_feature(op, down_graph, op2node, op2index)
+        state = torch.cat([self._up_states[op], self._down_states[op]])
+        self._last_h = torch.relu(self._trans(state))
+        if issue == 'none':
+            # no schedule
+            res = None
+        elif issue == 'inline':
+            # decide whether to compute inline
+            res = torch.softmax(self._inline_decider(self._last_h), dim=0)
+        elif issue == 'compute_at':
+            # decide wether and where to compute at
+            res = torch.softmax(self._at_decider(self._last_h), dim=0)
+        elif issue == 'split':
+            # for split, others is the feature of the axis to split
+            res = torch.softmax(self._split_decider(torch.cat([self._last_h, others])), dim=0)
+        elif issue == 'fuse':
+            # for fuse, others is the feature of the axis to fuse
+            res = torch.softmax(self._fuse_decider(torch.cat([self._last_h, others])), dim=0)
+        elif issue == 'reorder':
+            # for reorder, others is the list of features of axes to reorder
+            res = torch.softmax(self._reorder_decider(torch.cat([self._last_h] + others)), dim=0)
+        elif issue == 'parallel':
+            # for parallel, others is the feature of the axis to parallel
+            res = torch.softmax(self._parallel_decider(torch.cat([self._last_h, others])), dim=0)
+        elif issue == 'unroll':
+            # for unroll, others is the feature of the axis to unroll
+            res = torch.softmax(self._unroll_decider(torch.cat([self._last_h, others])), dim=0)
+        elif issue == 'vectorize':
+            # for vectorize, others is the feature of the axis to vectorize
+            res = torch.softmax(self._vectorize_decider(torch.cat([self._last_h, others])), dim=0)
+        else:
+            raise NotImplementedError("No such schedule decider: {}".format(issue))
+        return res
 
     def reset(self, src, end, down_graph, op2node, op2index):
-        self._cache_schedule = {}
-        self._cache_up_states = {}
-        self._cache_down_states = {}
-        self._last_h = torch.zeros(self._hidden)
+
+        self._up_states = {}
+        self._down_states = {}
+        self._last_h = torch.ones(self._hidden)
         self._get_whole_graph_feature(src, end, down_graph, op2node, op2index)
         self._new = True
 
     def _get_attention(self, h):
         cache_attentions = {}
         total = torch.tensor(0.0)
-        for op, up_state in self._cache_up_states.items():
-            down_state = self._cache_down_states[op]
+        for op, up_state in self._up_states.items():
+            down_state = self._down_states[op]
             state = torch.cat([down_state, up_state])
             cache_attentions[op] = state.matmul(self._attention).matmul(h)
             total += cache_attentions[op]
         attention_state = torch.zeros(self._hidden * 2)
         for op, val in cache_attentions.items():
             tmp = val / total
-            state = torch.cat([self._cache_down_states[op], self._cache_up_states[op]])
+            state = torch.cat([self._down_states[op], self._up_states[op]])
             attention_state += tmp * state 
         return attention_state
 
     def _get_down_graph_feature(self, op, op2node, op2index):
         if op is None:
             return
+        if op in self._down_states:
+            return
+        # current node
         node = op2node[op]
-        index = op2index[op]
         if not op.input_tensors:
-            self._cache_down_states[op] = self._node_cell(node.get_feature(), [torch.zeros(self._hidden)])
+            self._down_states[op] = self._node_cell(node.get_feature(), [torch.zeros(self._hidden)])
             return
         axis_cache = []
         for p in op.input_tensors:
             p_op = p.op
+            # parent node
             p_node = op2node[p_op]
+            # parent index
+            p_index = op2index[p_op]
             self._get_down_graph_feature(p_op, op2node, op2index)
-            axis_count = len(op.axis) if hasattr(op, 'axis') else 0
-            features = p_node.get_use_feature()
-            for i in range(axis_count):
-                for feature in features[i][index]:
-                    # feature[1] indicates which axis in op visits p_op
-                    if feature[1] >= axis_count:
-                        axis_cache.append(self._reduce_axis_cell(feature, self._cache_down_states[p_op]))
-                    else:
-                        axis_cache.append(self._axis_cell(feature, self._cache_down_states[p_op]))
-        self._cache_down_states[op] = self._node_cell(node.get_feature(), axis_cache)
+            # if input_tensors is not empty, must be compute node
+            axis_count = len(op.axis)
+            features = node.get_axis_features()
+            for var_name, feature in features.items():
+                if p_index in feature:
+                    for f in feature[p_index]:
+                        # f[1] indicates which axis in op visits p_op
+                        if f[1] >= axis_count:
+                            axis_cache.append(self._reduce_axis_cell(f, self._down_states[p_op]))
+                        else:
+                            axis_cache.append(self._axis_cell(f, self._down_states[p_op]))
+        self._down_states[op] = self._node_cell(node.get_feature(), axis_cache)
     
     def _get_up_graph_feature(self, op, down_graph, op2node, op2index):
         if op is None:
             return
+        if op in self._up_states:
+            return
         node = op2node[op]
+        index = op2index[op]
         if op not in down_graph:
-            self._cache_up_states[op] = self._node_cell(node.get_feature(), [torch.zeros(self._hidden)])
+            self._up_states[op] = self._node_cell(node.get_feature(), [torch.zeros(self._hidden)])
             return
         axis_cache = []
         for c_op in down_graph[op]:
+            # child node
             c_node = op2node[c_op]
-            c_index = op2index[c_op]
             self._get_up_graph_feature(c_op, down_graph, op2node, op2index)
-            axis_count = len(c_op.axis) if hasattr(c_op, 'axis') else 0
-            features = node.get_use_feature()
-            for i in range(axis_count):
-                for feature in features[i][c_index]:
-                    if feature[1] >= axis_count:
-                        axis_cache.append(self._reduce_axis_cell(feature, self._cache_up_states[c_op]))
-                    else:
-                        axis_cache.append(self._axis_cell(feature, self._cache_up_states[c_op]))
-        self._cache_up_states[op] = self._node_cell(node.get_feature(), axis_cache)
+            # c_op must be compute operation
+            axis_count = len(c_op.axis)
+            features = c_node.get_axis_features()
+            for var_name, feature in features.items():
+                if index in feature:
+                    for f in feature[index]:
+                        if f[1] >= axis_count:
+                            axis_cache.append(self._reduce_axis_cell(f, self._up_states[c_op]))
+                        else:
+                            axis_cache.append(self._axis_cell(f, self._up_states[c_op]))
+        self._up_states[op] = self._node_cell(node.get_feature(), axis_cache)
 
     def _get_whole_graph_feature(self, src, end, down_graph, op2node, op2index):
         for op in end:
             self._get_down_graph_feature(op, op2node, op2index)
         for op in src:
             self._get_up_graph_feature(op, down_graph, op2node, op2index)
-    
-    def _get_region_feature(self, op, op2node):
-        p_cache = []
+
+    def _update_region_feature(self, op, down_graph, op2node, op2index):
+        node = op2node[op]
+        index = op2index[op]
         for p in op.input_tensors:
             p_op = p.op
-            if p_op in self._cache_schedule:
-                p_cache.append(self._cache_schedule[p_op])
-                continue
             p_node = op2node[p_op]
-            schedule_list = p_node.get_schedule_list()
-            act_embed_input= []
-            for act_no, act in schedule_list:
-                act_embed_input.append(act_no)
-            act_embed_input = torch.LongTensor(act_embed_input)
-            act_embed = self._action2embed(act_embed_input)
-            h = self._cache_down_states[p_op]
-            for i in range(len(schedule_list)):
-                h = self._action_cell(act_embed[i], h)
-            self._cache_schedule[p_op] = h
-            p_cache.append(h)
-        if not p_cache:
-            p_cache.append(torch.zeros(self._hidden))
-        p_state = self._schedule_cell(torch.cat([self._cache_down_states[op], self._cache_up_states[op]]), p_cache)
-        return p_state
+            p_index = op2index[p_op]
+            # op must be compute operation
+            axis_count = len(op.axis)
+            features = node.get_axis_features()
+            axis_cache = []
+            for var_name, feature in features.items():
+                if p_index in feature:
+                    for f in feature[p_index]:
+                        if f[1] >= axis_count:
+                            axis_cache.append(self._reduce_axis_cell(f, self._down_states[p_op]))
+                        else:
+                            axis_cache.append(self._axis_cell(f, self._down_states[p_op]))
+            self._down_states[op] = self._node_cell(node.get_feature(), axis_cache)
+        if op in down_graph:
+            for c_op in down_graph[op]:
+                c_node = op2node[c_op]
+                # c_op must be compute operation
+                axis_count = len(c_op.axis)
+                features = c_node.get_axis_features()
+                axis_cache = []
+                for var_name, feature in features.items():
+                    if index in feature:
+                        for f in feature[index]:
+                            if f[1] >= axis_count:
+                                axis_cache.append(self._reduce_axis_cell(f, self._up_states[c_op]))
+                            else:
+                                axis_cache.append(self._axis_cell(f, self._up_states[c_op]))
+            self._up_states[op] = self._node_cell(node.get_feature(), axis_cache)
+
+    def print_parameter_size(self):
+        p_size = 0
+        for p in self.parameters():
+            mul = 1
+            for v in p.shape:
+                mul *= v
+            p_size += mul
+        print("Total size of parameters: {}MB".format(p_size * 4 / (1024**2)))
 
 
 
