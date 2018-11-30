@@ -5,8 +5,8 @@ from collections import deque
 from error import Warning, INFO, Error, __LINE__
 
 NotSure = 1024
-Node_feature_dim = 4
-Axis_feature_dim = 5
+Node_feature_dim = 10
+Axis_feature_dim = 9
 
 op2node = {}
 op2index = {}
@@ -15,7 +15,8 @@ src = []
 end = []
 down_graph = {}
 action2index = {}
-index2action = []
+index2action = []        
+
 
 class oNode(object):
     '''
@@ -26,7 +27,7 @@ class oNode(object):
     def __init__(self, op, total=1):
         self._op = op
         self._shape = []
-        self._schedule_record = []
+
         for l in op.output(0).shape:
             try:
                 tmp = int(l)
@@ -37,10 +38,13 @@ class oNode(object):
         for i in range(len(self._shape)):
             self._use_feature.append({})    
         _feature = torch.zeros(Node_feature_dim, dtype=torch.float32)
-        _feature[1] = len(self._shape)
-        _feature[2] = len(self._op.input_tensors)
+        _feature[2] = len(self._shape)
+        _feature[3] = len(self._op.input_tensors)
         if self._op in down_graph:
-            _feature[3] = len(down_graph[self._op])
+            _feature[4] = len(down_graph[self._op])
+        # Explaination of self._feature: each element represents a feature value
+        # [axis_len, reduce_axis_len, output_dim, num_inputs, count_used, inline, compute_at,
+        #  be_computed_at, be_at_where, use_parallel]
         self._feature = _feature
     
     def add_axis_feature(self, msg):
@@ -66,7 +70,7 @@ class oNode(object):
         for var_name, ab in msg.items():
             dom = node.get_dom(var_name)
             no = node.get_pos(var_name)
-            tmp.append(torch.tensor([where, no, ab['a'], ab['b'], dom], dtype=torch.float32))
+            tmp.append(torch.tensor([where, no, ab['a'], ab['b'], dom, 0, 0, 0, 0], dtype=torch.float32))
         if index not in self._use_feature[where]:
             self._use_feature[where][index] = []
         self._use_feature[where][index].extend(tmp)
@@ -82,13 +86,6 @@ class oNode(object):
     
     def get_feature(self):
         return self._feature
-    
-    def add_schedule(self, schedule):
-        self._schedule_record.append((action2index[schedule.__class__], schedule))
-    
-    def get_schedule_list(self):
-        return self._schedule_record
-
 
 
 class pNode(oNode):
@@ -109,8 +106,14 @@ class cNode(oNode):
     '''
     def __init__(self, op, total=1):
         super(cNode, self).__init__(op, total)
-        self._feature[0] = len(self._op.reduce_axis)
-        length = len(op.axis) + len(op.reduce_axis)
+        # Information for schedule
+        self._schedule_record = []
+
+        # feature of self modify by axis
+        self._feature[0] = len(self._op.axis)
+        self._feature[1] = len(self._op.reduce_axis)
+
+        # Information for index axis and feature
         self._axis2index = {}
         self._index2axis = []
         self._axis2feature = {}
@@ -137,7 +140,18 @@ class cNode(oNode):
             counter += 1
         
         self._axis2index["__hidden__"] = counter
+        self._index2axis.append("__hidden__")
+
+        self._cache_axis2index = {}
+        self._cache_index2axis = []
+        self._cache_axis2feature = {}
     
+    def reset(self):
+        self._cache_index2axis = self._index2axis.copy()
+        self._cache_axis2feature = self._axis2feature.copy()
+        self._cache_axis2index = self._axis2index.copy()
+
+    # TODO not necessary to use this
     def add_axis_feature(self, msg):
         '''
         add features for an axis of the operation
@@ -145,21 +159,47 @@ class cNode(oNode):
         for var_name, feature in msg.items():
             tmp1 = {}
             for op_index, val in feature.items():
-                node = op2node[index2op[op_index]]
-                tmp2 = []
-                for v in val:
-                    tmp2.append(v)
-                tmp1[op_index] = tmp2
+                tmp1[op_index] = val
             self._axis2feature[var_name] = tmp1
     
-    def get_axis_feature(self, var_name):
-        return self._axis2feature[var_name]
+    def update_axis_feature(self, old_var_name, new_features):
+        index = self._cache_axis2index[old_var_name]
+        length = len(new_features)
+        new_var_names = [old_var_name + "_" + str(i) for i in range(length)]
+        del self._cache_axis2index[old_var_name]
+        del self._cache_index2axis[index]
+        del self._cache_axis2feature[old_var_name]
+        for i, new_var_name in enumerate(new_var_names):
+            self._cache_index2axis.insert(index + i, new_var_name)
+            self._cache_axis2index[new_var_name] = index + i
+            self._cache_axis2feature[new_var_name] = new_features[i]
+    
+    def get_axis_features(self):
+        # empty feature is due to forget to reset
+        if not self._cache_axis2feature:
+            self.reset()
+        return self._cache_axis2feature
         
     def get_dom(self, var_name):
         return self._axis2dom[var_name]
     
     def get_pos(self, var_name):
-        return self._axis2index[var_name]
+        # empty dict is due to forget to reset
+        if not self._cache_axis2index:
+            self.reset()
+        return self._cache_axis2index[var_name]
+    
+    def get_var_names(self):
+        # empty list is due to forget to reset
+        if not self._cache_index2axis:
+            self.reset()
+        return self._cache_index2axis
+    
+    def add_schedule(self, schedule):
+        self._schedule_record.append(schedule)
+    
+    def get_schedule_list(self):
+        return self._schedule_record
     
     def print_feature(self):
         super(cNode, self).print_feature()
@@ -175,23 +215,33 @@ class cNode(oNode):
 
 
 class Action(object):
-    pass
+    def apply(self, s, op):
+        pass
 
 class ComputeAt(Action):
     def __init__(self, consumer, axis):
         super(ComputeAt, self).__init__()
         self._consumer = consumer
         self._axis = axis
+    
+    def apply(self, s, op):
+        s[op].compute_at(self._consumer, self._axis)
 
 class ComputeInline(Action):
     def __init__(self):
         super(ComputeInline, self).__init__()
+    
+    def apply(self, s, op):
+        s[op].compute_inline()
 
 class Split(Action):
     def __init__(self, axis, nparts):
         super(Split, self).__init__()
         self._axis = axis
         self._nparts = nparts     
+    
+    def apply(self, s, op):
+        pass
 
 class Reorder(Action):
     def __init__(self, axis_list):
@@ -351,7 +401,7 @@ def Visit_Call(call, msg=None):
         expr = tvm.ir_pass.Simplify(expr)
         Visit_Expr(expr, msg)
         for var_name, ab in msg['vars'].items():
-            feature = torch.tensor([origin_node.get_pos(var_name), i, ab['a'], ab['b'], origin_node.get_dom(var_name)], dtype=torch.float32)
+            feature = torch.tensor([i, origin_node.get_pos(var_name), ab['a'], ab['b'], origin_node.get_dom(var_name), 0, 0, 0, 0], dtype=torch.float32)
             if op2index[op] not in msg['features'][var_name]:
                 msg['features'][var_name][op2index[op]] = []
             msg['features'][var_name][op2index[op]].append(feature)
